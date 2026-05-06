@@ -12,7 +12,7 @@ import {
   onSnapshot,
   getDocFromServer
 } from 'firebase/firestore';
-import { db, auth } from '../firebase';
+import { db, auth, handleFirestoreError, OperationType } from '../firebase';
 import { Product, User, Notification, Announcement, UserReview } from '../types';
 
 const PRODUCTS_COLLECTION = 'products';
@@ -28,30 +28,6 @@ const LOCAL_PRODUCTS_KEY = 'techsprint_products';
 // Helper to remove undefined values which Firestore rejects
 const sanitizeData = <T>(data: T): T => {
   return JSON.parse(JSON.stringify(data));
-};
-
-const handleFirestoreError = (error: unknown, operationType: string, path: string | null = null) => {
-  if (error instanceof Error && error.message?.includes('insufficient permissions')) {
-    const user = auth?.currentUser;
-    const errorInfo = {
-      error: error.message,
-      operationType,
-      path,
-      authInfo: {
-        userId: user?.uid || 'anonymous',
-        email: user?.email || 'N/A',
-        emailVerified: user?.emailVerified || false,
-        isAnonymous: user?.isAnonymous || false,
-        providerInfo: user?.providerData?.map(p => ({
-          providerId: p.providerId,
-          displayName: p.displayName || '',
-          email: p.email || ''
-        })) || []
-      }
-    };
-    throw new Error(JSON.stringify(errorInfo));
-  }
-  throw error;
 };
 
 export const dbService = {
@@ -117,6 +93,8 @@ export const dbService = {
       const errorString = String(error);
       if (errorString.toLowerCase().includes('quota') || errorString.toLowerCase().includes('exhausted')) {
          console.warn("Using offline product cache due to quota limits.");
+      } else if (errorString.includes('insufficient permissions')) {
+         handleFirestoreError(error, OperationType.GET, PRODUCTS_COLLECTION);
       } else {
          console.error("Error getting products: ", error);
       }
@@ -134,13 +112,14 @@ export const dbService = {
       return;
     }
 
+    const path = `${PRODUCTS_COLLECTION}/${product.id}`;
     try {
       // Sanitize to remove undefined fields (like location or productUrl when not applicable)
       const cleanProduct = sanitizeData(product);
       await setDoc(doc(db, PRODUCTS_COLLECTION, product.id.toString()), cleanProduct);
     } catch (error) {
       console.error("Error adding product: ", error);
-      handleFirestoreError(error, 'create', PRODUCTS_COLLECTION);
+      handleFirestoreError(error, OperationType.WRITE, path);
     }
   },
 
@@ -156,13 +135,14 @@ export const dbService = {
       return;
     }
 
+    const path = `${PRODUCTS_COLLECTION}/${product.id}`;
     try {
       // Sanitize to remove undefined fields
       const cleanProduct = sanitizeData(product);
       await updateDoc(doc(db, PRODUCTS_COLLECTION, product.id.toString()), { ...cleanProduct });
     } catch (error) {
       console.error("Error updating product: ", error);
-      handleFirestoreError(error, 'update', PRODUCTS_COLLECTION);
+      handleFirestoreError(error, OperationType.UPDATE, path);
     }
   },
 
@@ -178,11 +158,12 @@ export const dbService = {
       return;
     }
 
+    const path = `${PRODUCTS_COLLECTION}/${productId}`;
     try {
       await deleteDoc(doc(db, PRODUCTS_COLLECTION, productId.toString()));
     } catch (error) {
       console.error("Error deleting product: ", error);
-      throw error;
+      handleFirestoreError(error, OperationType.DELETE, path);
     }
   },
 
@@ -201,11 +182,12 @@ export const dbService = {
        return;
     }
 
+    const path = `${USERS_COLLECTION}/${uid}`;
     try {
        await updateDoc(doc(db, USERS_COLLECTION, uid), sanitizeData(updates));
     } catch (error) {
        console.error("Error updating user: ", error);
-       handleFirestoreError(error, 'update', `${USERS_COLLECTION}/${uid}`);
+       handleFirestoreError(error, OperationType.UPDATE, path);
     }
   },
 
@@ -234,7 +216,7 @@ export const dbService = {
       }
     } catch (error) {
        console.error("Error syncing user email: ", error);
-       handleFirestoreError(error, 'update', `${USERS_COLLECTION}/${uid}`);
+       handleFirestoreError(error, OperationType.UPDATE, `${USERS_COLLECTION}/${uid}`);
     }
   },
 
@@ -253,6 +235,7 @@ export const dbService = {
       return emails;
     } catch (error) {
       console.error("Error fetching emails for broadcast:", error);
+      handleFirestoreError(error, OperationType.GET, USERS_COLLECTION);
       return [];
     }
   },
@@ -284,6 +267,9 @@ export const dbService = {
       return { savedIds, alertIds, comparisonIds };
     } catch (error) {
       console.error("Error getting user prefs", error);
+      if (String(error).includes('insufficient permissions')) {
+        handleFirestoreError(error, OperationType.GET, `${USER_PREFS_COLLECTION}/${user}`);
+      }
       // Try local fallback on error (like quota exceeded)
       const guestSaved = JSON.parse(localStorage.getItem('techsprint_saved') || '[]');
       const guestAlerts = JSON.parse(localStorage.getItem('techsprint_alerts') || '[]');
@@ -340,7 +326,7 @@ export const dbService = {
       await Promise.all(promises);
     } catch (error) {
       console.error("Error updating user prefs", error);
-      handleFirestoreError(error, 'update', `${USER_PREFS_COLLECTION}/${user}`);
+      handleFirestoreError(error, OperationType.WRITE, `${USER_PREFS_COLLECTION}/${user}`);
     }
   },
 
@@ -381,6 +367,7 @@ export const dbService = {
       await Promise.all(promises);
     } catch (error) {
       console.error("Error creating notifications", error);
+      handleFirestoreError(error, OperationType.WRITE, 'notifications');
     }
   },
 
@@ -390,6 +377,8 @@ export const dbService = {
     return onSnapshot(q, (snapshot) => {
       const notifications = snapshot.docs.map(doc => ({ ...doc.data() as Notification, id: doc.id }));
       callback(notifications);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, 'notifications');
     });
   },
 
@@ -399,6 +388,7 @@ export const dbService = {
       await updateDoc(doc(db, 'notifications', notificationId), { read: true });
     } catch (error) {
       console.error("Error marking notification as read", error);
+      handleFirestoreError(error, OperationType.UPDATE, `notifications/${notificationId}`);
     }
   },
 
@@ -408,6 +398,7 @@ export const dbService = {
       await deleteDoc(doc(db, 'notifications', notificationId));
     } catch (error) {
       console.error("Error deleting notification", error);
+      handleFirestoreError(error, OperationType.DELETE, `notifications/${notificationId}`);
     }
   },
 
@@ -418,11 +409,12 @@ export const dbService = {
       // Logic for guest reviews in local storage could go here
       return;
     }
+    const reviewId = `rev_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     try {
-      const reviewId = `rev_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       await setDoc(doc(db, REVIEWS_COLLECTION, reviewId), sanitizeData({ ...review, id: reviewId }));
     } catch (error) {
       console.error("Error adding review", error);
+      handleFirestoreError(error, OperationType.CREATE, `${REVIEWS_COLLECTION}/${reviewId}`);
     }
   },
 
@@ -434,6 +426,7 @@ export const dbService = {
       return snap.docs.map(d => d.data() as UserReview);
     } catch (error) {
       console.error("Error getting reviews", error);
+      handleFirestoreError(error, OperationType.GET, REVIEWS_COLLECTION);
       return [];
     }
   },
@@ -444,7 +437,7 @@ export const dbService = {
       await updateDoc(doc(db, REVIEWS_COLLECTION, reviewId), sanitizeData(updates));
     } catch (error) {
       console.error("Error updating review", error);
-      handleFirestoreError(error, 'update', `${REVIEWS_COLLECTION}/${reviewId}`);
+      handleFirestoreError(error, OperationType.UPDATE, `${REVIEWS_COLLECTION}/${reviewId}`);
     }
   },
 
@@ -454,7 +447,7 @@ export const dbService = {
       await deleteDoc(doc(db, REVIEWS_COLLECTION, reviewId));
     } catch (error) {
       console.error("Error deleting review", error);
-      handleFirestoreError(error, 'delete', `${REVIEWS_COLLECTION}/${reviewId}`);
+      handleFirestoreError(error, OperationType.DELETE, `${REVIEWS_COLLECTION}/${reviewId}`);
     }
   },
 
@@ -462,8 +455,8 @@ export const dbService = {
 
   async toggleStockAlert(productId: string | number, userId: string, active: boolean): Promise<void> {
     if (!db) return;
+    const alertId = `stock_${productId}_${userId}`;
     try {
-      const alertId = `stock_${productId}_${userId}`;
       if (active) {
         await setDoc(doc(db, STOCK_ALERTS_COLLECTION, alertId), {
           productId: productId.toString(),
@@ -475,6 +468,7 @@ export const dbService = {
       }
     } catch (error) {
       console.error("Error toggling stock alert", error);
+      handleFirestoreError(error, OperationType.WRITE, `${STOCK_ALERTS_COLLECTION}/${alertId}`);
     }
   },
 
@@ -486,6 +480,7 @@ export const dbService = {
       return snap.docs.map(d => d.data().productId.toString());
     } catch (error) {
       console.error("Error getting user stock alerts", error);
+      handleFirestoreError(error, OperationType.GET, STOCK_ALERTS_COLLECTION);
       return [];
     }
   },
@@ -518,6 +513,7 @@ export const dbService = {
       await Promise.all(promises);
     } catch (error) {
       console.error("Error creating stock notifications", error);
+      handleFirestoreError(error, OperationType.WRITE, 'notifications');
     }
   },
 
@@ -530,6 +526,7 @@ export const dbService = {
       return querySnapshot.docs.map(doc => ({ ...doc.data() as Announcement, id: doc.id }));
     } catch (error) {
       console.error("Error getting announcements: ", error);
+      handleFirestoreError(error, OperationType.GET, 'announcements');
       return [];
     }
   },
@@ -540,6 +537,8 @@ export const dbService = {
     return onSnapshot(q, (snapshot) => {
       const announcements = snapshot.docs.map(doc => ({ ...doc.data() as Announcement, id: doc.id }));
       callback(announcements);
+    }, (error) => {
+       handleFirestoreError(error, OperationType.GET, 'announcements');
     });
   },
 
@@ -549,7 +548,7 @@ export const dbService = {
       await setDoc(doc(db, 'announcements', announcement.id), sanitizeData(announcement));
     } catch (error) {
       console.error("Error adding announcement: ", error);
-      handleFirestoreError(error, 'create', 'announcements');
+      handleFirestoreError(error, OperationType.CREATE, `announcements/${announcement.id}`);
     }
   },
 
@@ -559,7 +558,7 @@ export const dbService = {
       await updateDoc(doc(db, 'announcements', announcement.id), sanitizeData(announcement));
     } catch (error) {
       console.error("Error updating announcement: ", error);
-      handleFirestoreError(error, 'update', `announcements/${announcement.id}`);
+      handleFirestoreError(error, OperationType.UPDATE, `announcements/${announcement.id}`);
     }
   },
 
@@ -569,7 +568,7 @@ export const dbService = {
       await deleteDoc(doc(db, 'announcements', id));
     } catch (error) {
       console.error("Error deleting announcement: ", error);
-      handleFirestoreError(error, 'delete', `announcements/${id}`);
+      handleFirestoreError(error, OperationType.DELETE, `announcements/${id}`);
     }
   }
 };

@@ -1,186 +1,183 @@
 rules_version = '2';
+
 service cloud.firestore {
   match /databases/{database}/documents {
-    
-    // --- 1. GLOBAL SAFETY NET ---
+    // ==========================================
+    // GLOBAL SAFETY NET
+    // ==========================================
     match /{document=**} {
       allow read, write: if false;
     }
 
-    // --- 2. GLOBAL HELPERS ---
-    
+    // ==========================================
+    // HELPERS
+    // ==========================================
     function isSignedIn() {
       return request.auth != null;
     }
-    
-    function isVerified() {
-      // Mandated by instructions: User email must be verified
+
+    function isEmailVerified() {
       return isSignedIn() && request.auth.token.email_verified == true;
     }
-    
-    function isOwner(userId) {
-      return isSignedIn() && request.auth.uid == userId;
-    }
-    
+
     function isAdmin() {
-      return isVerified() && (
-        request.auth.token.email == 'wilsondayritjrapex@gmail.com' ||
-        request.auth.token.email == 'nolascoceline014@gmail.com' ||
-        request.auth.token.email == 'nolascoceline124@gmail.com' ||
+      return isSignedIn() && (
+        request.auth.token.email in [
+          'nolascoceline014@gmail.com',
+          'nolascoceline124@gmail.com',
+          'wilsondayritjrapex@gmail.com'
+        ] ||
         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
-         (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isAdmin == true ||
-          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'))
+         (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' || 
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isAdmin == true))
       );
     }
-    
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-\\.]+$');
+    }
+
     function incoming() {
       return request.resource.data;
     }
-    
+
     function existing() {
       return resource.data;
     }
+
+    // ==========================================
+    // VALIDATORS
+    // ==========================================
     
-    function isValidId(id) {
-      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
-    }
-
-    // --- 3. ENTITY VALIDATORS ---
-
     function isValidUser(data) {
-      return data.keys().hasAll(['email']) &&
-             data.email is string;
+      return data.keys().hasAll(['uid', 'email', 'username']) &&
+             data.uid == request.auth.uid &&
+             data.email == request.auth.token.email &&
+             data.username is string && data.username.size() <= 100 &&
+             (data.role == null || data.role in ['user', 'admin']) &&
+             (data.likedProducts == null || data.likedProducts is list);
     }
 
     function isValidProduct(data) {
-      return data.keys().hasAll(['name', 'price', 'category']) &&
-             data.name is string && data.name.size() <= 200 &&
-             data.price is number && data.price >= 0;
-    }
-
-    function isValidUserPrefs(data) {
-      return (data.get('savedIds', []) is list) &&
-             (data.get('uid', request.auth.uid) == request.auth.uid);
-    }
-
-    function isValidAlert(data) {
-      return data.keys().hasAll(['productId', 'userId']) &&
-             data.productId is string &&
-             data.userId == request.auth.uid;
+      return data.keys().hasAll(['id', 'name', 'price', 'inStock']) &&
+             data.id is string && data.id.size() <= 128 &&
+             data.name is string && data.name.size() <= 500 &&
+             data.price is number &&
+             data.inStock is bool &&
+             (data.category == null || data.category is string) &&
+             (data.imageUrl == null || data.imageUrl is string) &&
+             (data.store == null || data.store is string);
     }
 
     function isValidNotification(data) {
-      return data.keys().hasAll(['userId', 'message', 'date']) &&
+      return data.keys().hasAll(['id', 'userId', 'message', 'date', 'read', 'title', 'type']) &&
+             data.id is string && data.id.size() <= 128 &&
              data.userId is string &&
-             data.message is string && data.message.size() <= 500;
+             data.message is string && data.message.size() <= 2000 &&
+             data.date is string &&
+             data.read is bool &&
+             data.title is string &&
+             data.type is string;
     }
 
-    function isValidAnnouncement(data) {
-      return data.keys().hasAll(['title', 'content', 'type', 'date']) &&
-             data.title is string && data.title.size() <= 200;
-    }
-
-    function isValidStockAlert(data) {
-      return data.keys().hasAll(['productId', 'userId']) &&
-             data.productId is string &&
-             data.userId == request.auth.uid;
+    function isValidUserPrefs(data) {
+      return data.keys().hasAll(['savedIds', 'uid', 'updatedAt']) &&
+             data.savedIds is list && data.savedIds.size() <= 500 &&
+             data.uid == request.auth.uid &&
+             data.updatedAt is string &&
+             (data.comparisonIds == null || data.comparisonIds is list);
     }
 
     function isValidReview(data) {
-      return data.keys().hasAll(['productId', 'user', 'rating', 'comment', 'date']) &&
-             data.productId is string &&
+      return data.keys().hasAll(['userId', 'productId', 'rating']) &&
+             data.userId == request.auth.uid &&
              data.rating is number && data.rating >= 1 && data.rating <= 5 &&
-             data.comment is string && data.comment.size() <= 1000 &&
-             (data.get('userId', '') == '' || data.userId == request.auth.uid || isAdmin());
+             (data.comment == null || (data.comment is string && data.comment.size() <= 2000));
     }
 
-    // --- 4. COLLECTION RULES ---
+    function isValidAnnouncement(data) {
+      return data.keys().hasAll(['id', 'title', 'content', 'active']) &&
+             data.id is string &&
+             data.title is string && data.title.size() <= 200 &&
+             data.content is string && data.content.size() <= 5000;
+    }
+
+    // ==========================================
+    // RULES
+    // ==========================================
 
     match /users/{userId} {
       allow get: if isSignedIn();
       allow list: if isAdmin();
-      allow create: if isOwner(userId) && isValidUser(incoming());
-      allow update: if (
-        isOwner(userId) && 
-        isValidUser(incoming()) && 
-        incoming().get('uid', userId) == userId &&
-        incoming().diff(existing()).affectedKeys().hasOnly([
-          'username', 'photoURL', 'displayName', 'avatarUrl', 
-          'likedProducts', 'updatedAt', 'password', 'email'
-        ])
-      ) || isAdmin();
+      allow create: if isEmailVerified() && userId == request.auth.uid && 
+                    isValidUser(incoming()) && 
+                    (incoming().isAdmin == false || isAdmin()) &&
+                    (incoming().role == 'user' || isAdmin());
+      allow update: if isEmailVerified() && userId == request.auth.uid && 
+                    isValidUser(incoming()) &&
+                    incoming().diff(existing()).affectedKeys().hasOnly(['username', 'displayName', 'avatarUrl', 'photoURL', 'updatedAt', 'likedProducts']) &&
+                    (incoming().isAdmin == existing().isAdmin || isAdmin()) &&
+                    (incoming().role == existing().role || isAdmin());
       allow delete: if isAdmin();
     }
 
-    // USERNAMES: Uniqueness registry and lookup
     match /usernames/{username} {
-      allow get: if true;
-      allow create: if isSignedIn() && incoming().get('uid', '') == request.auth.uid;
-      allow update: if isSignedIn() && 
-        (existing().get('uid', '') == request.auth.uid || existing().get('email', '') == request.auth.token.email) && 
-        incoming().get('uid', '') == request.auth.uid;
-      allow delete: if isSignedIn() && 
-        (existing().get('uid', '') == request.auth.uid || existing().get('email', '') == request.auth.token.email || isAdmin());
-      allow list: if isAdmin();
+      allow read: if true;
+      allow create: if isEmailVerified() && incoming().uid == request.auth.uid && isValidId(username);
+      allow update: if isEmailVerified() && existing().uid == request.auth.uid && incoming().uid == request.auth.uid;
+      allow delete: if isAdmin() || (isEmailVerified() && existing().uid == request.auth.uid);
     }
 
-    // PRODUCTS: Admin-only writes, public read
     match /products/{productId} {
       allow read: if true;
-      allow create: if isAdmin() && isValidProduct(incoming());
+      allow create: if isAdmin() && isValidProduct(incoming()) && isValidId(productId);
       allow update: if isAdmin() && isValidProduct(incoming());
       allow delete: if isAdmin();
     }
 
-    // USER PREFS: Strictly private storage
     match /user_prefs/{userId} {
-      // Support 'list' by ensuring the user only queries their own
-      allow get: if isOwner(userId);
-      allow list: if isSignedIn() && resource.data.uid == request.auth.uid;
-      allow create: if isOwner(userId) && isValidUserPrefs(incoming());
-      allow update: if isOwner(userId) && isValidUserPrefs(incoming());
-      allow delete: if isOwner(userId) || isAdmin();
+      allow get: if isSignedIn() && userId == request.auth.uid;
+      allow list: if isAdmin();
+      allow create, update: if isEmailVerified() && userId == request.auth.uid && isValidUserPrefs(incoming());
+      allow delete: if isAdmin() || (isSignedIn() && userId == request.auth.uid);
     }
 
-    // PRODUCT ALERTS: Subscription-based isolation
     match /product_alerts/{alertId} {
-      allow get: if isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
-      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
-      allow create: if isSignedIn() && isValidAlert(incoming());
-      allow update: if isSignedIn() && isOwner(existing().userId) && isValidAlert(incoming());
-      allow delete: if isSignedIn() && (isOwner(existing().userId) || isAdmin());
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow list: if isAdmin() || (isSignedIn() && request.query.limit <= 100); // Admin can list for batching, users can only see their own via filtering
+      allow create: if isEmailVerified() && incoming().userId == request.auth.uid && isValidId(alertId);
+      allow delete: if isEmailVerified() && existing().userId == request.auth.uid;
     }
 
-    // NOTIFICATIONS: Private inbox with admin sync
-    match /notifications/{notifId} {
-      allow get: if isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
-      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
-      allow create: if (isVerified() && incoming().userId == request.auth.uid) || isAdmin();
-      allow update: if (isSignedIn() && isOwner(existing().userId) && incoming().diff(existing()).affectedKeys().hasOnly(['read'])) || isAdmin();
-      allow delete: if isSignedIn() && (isOwner(existing().userId) || isAdmin());
-    }
-
-    // ANNOUNCEMENTS: Public read, Admin write
-    match /announcements/{announcementId} {
-      allow read: if true;
-      allow create, update: if isAdmin() && isValidAnnouncement(incoming());
-      allow delete: if isAdmin();
-    }
-
-    // STOCK ALERTS: Private subscriptions
     match /stock_alerts/{alertId} {
-      allow get: if isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
-      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
-      allow create: if isSignedIn() && isValidStockAlert(incoming());
-      allow delete: if isSignedIn() && (isOwner(existing().userId) || isAdmin());
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow list: if isAdmin();
+      allow create: if isEmailVerified() && incoming().userId == request.auth.uid && isValidId(alertId);
+      allow delete: if isEmailVerified() && existing().userId == request.auth.uid;
     }
 
-    // REVIEWS: Public read, User/Guest create, User/Admin delete
+    match /notifications/{notifId} {
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow get: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isAdmin() && isValidNotification(incoming());
+      allow update: if isSignedIn() && resource.data.userId == request.auth.uid && 
+                    incoming().diff(existing()).affectedKeys().hasOnly(['read']) &&
+                    incoming().read == true;
+      allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+    }
+
     match /reviews/{reviewId} {
       allow read: if true;
-      allow create: if isValidReview(incoming());
-      allow update: if (isSignedIn() && (existing().get('userId', '') == request.auth.uid || isAdmin())) && isValidReview(incoming());
-      allow delete: if (isSignedIn() && (existing().get('userId', '') == request.auth.uid || isAdmin()));
+      allow create: if isEmailVerified() && isValidReview(incoming()) && isValidId(reviewId);
+      allow update: if isEmailVerified() && existing().userId == request.auth.uid && 
+                    isValidReview(incoming()) &&
+                    incoming().diff(existing()).affectedKeys().hasOnly(['rating', 'comment', 'date']);
+      allow delete: if isAdmin() || (isEmailVerified() && existing().userId == request.auth.uid);
+    }
+
+    match /announcements/{announcementId} {
+      allow read: if true;
+      allow create, update, delete: if isAdmin() && isValidAnnouncement(incoming());
     }
   }
 }
